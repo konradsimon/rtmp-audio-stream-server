@@ -2,7 +2,7 @@ const WebSocket = require('ws');
 const express = require('express');
 const app = express();
 
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 443;
 
 // Health check endpoint
 app.get('/', (req, res) => {
