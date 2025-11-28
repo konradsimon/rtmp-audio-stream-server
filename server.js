@@ -323,6 +323,30 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Test FFmpeg endpoint
+app.get('/api/test/ffmpeg', (req, res) => {
+  const { execSync } = require('child_process');
+  try {
+    const version = execSync(`${ffmpegPath} -version 2>&1 | head -n 3`, {
+      encoding: 'utf8',
+      timeout: 5000
+    });
+    res.json({
+      success: true,
+      ffmpegPath: ffmpegPath,
+      version: version.trim(),
+      found: ffmpegFound
+    });
+  } catch (e) {
+    res.json({
+      success: false,
+      ffmpegPath: ffmpegPath,
+      error: e.message,
+      found: ffmpegFound
+    });
+  }
+});
+
 // API endpoint für Stream-Status
 app.get('/api/stream/status', (req, res) => {
   const streamPath = path.join(mediaDir, 'live', 'stream', 'index.m3u8');
@@ -343,6 +367,17 @@ app.get('/api/stream/status', (req, res) => {
     }
   }
   
+  // Check if we can write to the directory
+  let canWrite = false;
+  try {
+    const testFile = path.join(streamDir, '.test-write');
+    fs.writeFileSync(testFile, 'test');
+    fs.unlinkSync(testFile);
+    canWrite = true;
+  } catch (e) {
+    canWrite = false;
+  }
+  
   res.json({
     active: nms.getSession ? true : false,
     hlsExists: streamExists,
@@ -350,7 +385,10 @@ app.get('/api/stream/status', (req, res) => {
     mediaDir: mediaDir,
     liveDirExists: liveDirExists,
     streamDirExists: streamDirExists,
-    files: files
+    canWrite: canWrite,
+    files: files,
+    ffmpegPath: ffmpegPath,
+    ffmpegFound: ffmpegFound
   });
 });
 
@@ -452,7 +490,9 @@ const config = {
         app: 'live',
         hls: true,
         hlsFlags: 'hls_time=2:hls_list_size=3:hls_flags=delete_segments',
-        hlsKeep: false
+        hlsKeep: false,
+        // Ensure output path is correct
+        hlsPath: path.join(mediaDir, 'live')
       }
     ]
   },
@@ -489,23 +529,44 @@ nms.on('donePublish', (id, StreamPath, args) => {
 
 // Listen for transcoding events
 nms.on('preTrans', (id, StreamPath, args) => {
-  console.log('[Transcode] ⚡ Start transcoding:', StreamPath, 'ID:', id);
-  console.log('[Transcode] Args:', JSON.stringify(args));
+  console.log('[Transcode] ⚡⚡⚡ START TRANSCODING ⚡⚡⚡');
+  console.log('[Transcode] StreamPath:', StreamPath);
+  console.log('[Transcode] ID:', id);
+  console.log('[Transcode] Args:', JSON.stringify(args, null, 2));
+  console.log('[Transcode] FFmpeg path:', ffmpegPath);
+  console.log('[Transcode] FFmpeg found:', ffmpegFound);
 });
 
 nms.on('postTrans', (id, StreamPath, args) => {
-  console.log('[Transcode] ✅ Transcoding success:', StreamPath);
+  console.log('[Transcode] ✅ Transcoding started successfully');
+  console.log('[Transcode] StreamPath:', StreamPath);
   const expectedPath = path.join(mediaDir, 'live', StreamPath.replace('/live/', ''), 'index.m3u8');
   console.log('[Transcode] Expected HLS path:', expectedPath);
-  if (fs.existsSync(expectedPath)) {
-    console.log('[Transcode] ✅ HLS file exists!');
-  } else {
-    console.log('[Transcode] ❌ HLS file NOT found at:', expectedPath);
-  }
+  
+  // Wait a bit and check again
+  setTimeout(() => {
+    if (fs.existsSync(expectedPath)) {
+      console.log('[Transcode] ✅✅✅ HLS file created! ✅✅✅');
+      const files = fs.readdirSync(path.dirname(expectedPath));
+      console.log('[Transcode] Files in directory:', files);
+    } else {
+      console.log('[Transcode] ❌ HLS file still NOT found');
+      console.log('[Transcode] Directory exists:', fs.existsSync(path.dirname(expectedPath)));
+      if (fs.existsSync(path.dirname(expectedPath))) {
+        const files = fs.readdirSync(path.dirname(expectedPath));
+        console.log('[Transcode] Files in directory:', files);
+      }
+    }
+  }, 3000);
 });
 
 nms.on('doneTrans', (id, StreamPath, args) => {
   console.log('[Transcode] 🛑 Transcoding stopped:', StreamPath);
+});
+
+// Also listen for any errors
+nms.on('error', (err) => {
+  console.error('[NMS] Error:', err);
 });
 
 // Listen for all Node Media Server events to debug
