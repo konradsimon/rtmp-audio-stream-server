@@ -324,8 +324,14 @@ app.get('/health', (req, res) => {
 
 // API endpoint für Stream-Status
 app.get('/api/stream/status', (req, res) => {
+  const streamPath = path.join(mediaDir, 'live', 'stream', 'index.m3u8');
+  const streamExists = fs.existsSync(streamPath);
+  
   res.json({
-    active: nms.getSession ? true : false
+    active: nms.getSession ? true : false,
+    hlsExists: streamExists,
+    hlsPath: streamPath,
+    mediaDir: mediaDir
   });
 });
 
@@ -349,8 +355,9 @@ const config = {
       {
         app: 'live',
         hls: true,
-        hlsFlags: '[hls_time=2:hls_list_size=3:hls_flags=delete_segments]',
-        hlsKeep: false // Lösche alte Segmente automatisch
+        hlsFlags: 'hls_time=2:hls_list_size=3:hls_flags=delete_segments',
+        hlsKeep: false, // Lösche alte Segmente automatisch
+        hlsPath: path.join(mediaDir, 'live')
       }
     ]
   },
@@ -385,19 +392,69 @@ nms.on('donePublish', (id, StreamPath, args) => {
 });
 
 // Proxy für HLS-Stream von NodeMediaServer zu Express
-// HLS wird direkt von Node Media Server bereitgestellt, wir müssen nur die statischen Dateien servieren
-app.use('/live', express.static(mediaDir, {
-  setHeaders: (res, path) => {
-    if (path.endsWith('.m3u8')) {
-      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    } else if (path.endsWith('.ts')) {
-      res.setHeader('Content-Type', 'video/mp2t');
-      res.setHeader('Cache-Control', 'public, max-age=3600');
-    }
-    res.setHeader('Access-Control-Allow-Origin', '*');
+// Proxying to Node Media Server's HTTP server which serves HLS files correctly
+app.use('/live', (req, res, next) => {
+  const http = require('http');
+  const targetUrl = `http://127.0.0.1:8888${req.path}`;
+  
+  console.log('[HLS Proxy] Request:', req.path, '->', targetUrl);
+  
+  // Set CORS headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+    return;
   }
-}));
+  
+  // Set appropriate content type based on file extension
+  if (req.path.endsWith('.m3u8')) {
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  } else if (req.path.endsWith('.ts')) {
+    res.setHeader('Content-Type', 'video/mp2t');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+  }
+  
+  const proxyReq = http.get(targetUrl, (proxyRes) => {
+    // Forward status code
+    res.status(proxyRes.statusCode);
+    
+    // Forward headers
+    Object.keys(proxyRes.headers).forEach(key => {
+      // Don't override our CORS and content-type headers
+      if (key.toLowerCase() !== 'access-control-allow-origin' && 
+          key.toLowerCase() !== 'content-type') {
+        res.setHeader(key, proxyRes.headers[key]);
+      }
+    });
+    
+    // Pipe the response
+    proxyRes.pipe(res);
+    
+    proxyRes.on('error', (err) => {
+      console.error('[HLS Proxy] Stream error:', err.message);
+      if (!res.headersSent) {
+        res.status(500).end();
+      } else {
+        res.destroy();
+      }
+    });
+  });
+  
+  proxyReq.on('error', (err) => {
+    console.error('[HLS Proxy] Request error:', err.message);
+    if (!res.headersSent) {
+      res.status(503).send('Stream nicht verfügbar - Läuft OBS?');
+    }
+  });
+  
+  req.on('close', () => {
+    proxyReq.destroy();
+  });
+});
 
 // Server starten
 nms.run();
