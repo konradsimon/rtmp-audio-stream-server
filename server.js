@@ -625,9 +625,10 @@ nms.on('doneConnect', (id, args) => {
 });
 
 nms.on('prePublish', (id, StreamPath, args) => {
-  console.log('[Stream] Gestartet:', StreamPath);
-  console.log('[Stream] App:', args.app || 'unknown');
-  console.log('[Stream] Trans config app:', config.trans?.tasks?.[0]?.app);
+  console.log('[Stream] ⚡⚡⚡ PRE PUBLISH ⚡⚡⚡');
+  console.log('[Stream] ID:', id);
+  console.log('[Stream] StreamPath:', StreamPath);
+  console.log('[Stream] Args:', JSON.stringify(args, null, 2));
   
   // Ensure live directory exists
   const liveDir = path.join(mediaDir, 'live');
@@ -638,7 +639,10 @@ nms.on('prePublish', (id, StreamPath, args) => {
 });
 
 nms.on('postPublish', (id, StreamPath, args) => {
-  console.log('[Stream] Läuft:', StreamPath);
+  console.log('[Stream] ✅✅✅ POST PUBLISH ✅✅✅');
+  console.log('[Stream] ID:', id);
+  console.log('[Stream] StreamPath:', StreamPath);
+  console.log('[Stream] Args:', JSON.stringify(args, null, 2));
   
   const streamName = StreamPath.replace('/live/', '');
   const streamDir = path.join(mediaDir, 'live', streamName);
@@ -651,11 +655,14 @@ nms.on('postPublish', (id, StreamPath, args) => {
   
   // Start custom FFmpeg transcoding
   if (StreamPath.startsWith('/live/')) {
-    console.log('[Stream] Starting custom FFmpeg transcoding...');
-    // Wait a moment for RTMP stream to be ready
+    console.log('[Stream] 🚀 Starting custom FFmpeg transcoding...');
+    console.log('[Stream] Stream name:', streamName);
+    // Wait a moment for RTMP stream to be ready and HTTP-FLV to be available
     setTimeout(() => {
       startFFmpegTranscoding(StreamPath, streamName);
-    }, 2000);
+    }, 3000); // Increased delay to ensure HTTP-FLV is ready
+  } else {
+    console.log('[Stream] ⚠️  StreamPath does not start with /live/, skipping transcoding');
   }
 });
 
@@ -722,14 +729,7 @@ nms.on('postConnect', (id, args) => {
   console.log('[NMS] postConnect:', id, args);
 });
 
-nms.on('prePublish', (id, StreamPath, args) => {
-  console.log('[NMS] prePublish:', id, StreamPath, args);
-});
-
-nms.on('postPublish', (id, StreamPath, args) => {
-  console.log('[NMS] postPublish:', id, StreamPath, args);
-  console.log('[NMS] Checking if trans config matches app "live"');
-});
+// Duplicate handlers removed - using the ones above
 
 // Proxy für HLS-Stream von NodeMediaServer zu Express
 app.use('/live', (req, res, next) => {
