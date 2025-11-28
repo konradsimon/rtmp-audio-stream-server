@@ -335,6 +335,35 @@ app.get('/api/stream/status', (req, res) => {
   });
 });
 
+// Find FFmpeg path
+const { execSync } = require('child_process');
+let ffmpegPath = 'ffmpeg'; // Default: use PATH
+try {
+  // Try common paths, starting with PATH
+  const possiblePaths = ['ffmpeg', '/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg'];
+  for (const testPath of possiblePaths) {
+    try {
+      // Try to get version - if this works, FFmpeg is available
+      const result = execSync(`${testPath} -version`, { 
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 2000
+      });
+      if (result && result.includes('ffmpeg version')) {
+        ffmpegPath = testPath;
+        console.log(`[FFmpeg] ✅ Found and verified: ${ffmpegPath}`);
+        break;
+      }
+    } catch (e) {
+      // Try next path
+      continue;
+    }
+  }
+} catch (e) {
+  console.error('[FFmpeg] ⚠️  Warning: Could not verify FFmpeg:', e.message);
+  console.error('[FFmpeg] Will try: ffmpeg (from PATH)');
+}
+
 // Node Media Server Konfiguration mit HLS-Transcoding
 const config = {
   rtmp: {
@@ -350,7 +379,7 @@ const config = {
     mediaroot: mediaDir
   },
   trans: {
-    ffmpeg: '/usr/bin/ffmpeg',
+    ffmpeg: ffmpegPath,
     tasks: [
       {
         app: 'live',
@@ -385,10 +414,24 @@ nms.on('prePublish', (id, StreamPath, args) => {
 
 nms.on('postPublish', (id, StreamPath, args) => {
   console.log('[Stream] Läuft:', StreamPath);
+  console.log('[Stream] HLS sollte erstellt werden in:', path.join(mediaDir, 'live', StreamPath.replace('/live/', ''), 'index.m3u8'));
 });
 
 nms.on('donePublish', (id, StreamPath, args) => {
   console.log('[Stream] Beendet:', StreamPath);
+});
+
+// Listen for transcoding events
+nms.on('preTrans', (id, StreamPath, args) => {
+  console.log('[Transcode] Start:', StreamPath);
+});
+
+nms.on('postTrans', (id, StreamPath, args) => {
+  console.log('[Transcode] Erfolg:', StreamPath);
+});
+
+nms.on('doneTrans', (id, StreamPath, args) => {
+  console.log('[Transcode] Beendet:', StreamPath);
 });
 
 // Proxy für HLS-Stream von NodeMediaServer zu Express
