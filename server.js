@@ -322,6 +322,28 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Test FFmpeg endpoint
+app.get('/api/test/ffmpeg', (req, res) => {
+  const { execSync } = require('child_process');
+  try {
+    const result = execSync(`${ffmpegPath} -version`, { 
+      encoding: 'utf8',
+      timeout: 5000
+    });
+    res.json({
+      success: true,
+      ffmpegPath: ffmpegPath,
+      version: result.split('\n')[0]
+    });
+  } catch (e) {
+    res.json({
+      success: false,
+      ffmpegPath: ffmpegPath,
+      error: e.message
+    });
+  }
+});
+
 // API endpoint für Stream-Status
 app.get('/api/stream/status', (req, res) => {
   const streamPath = path.join(mediaDir, 'live', 'stream', 'index.m3u8');
@@ -403,8 +425,8 @@ const config = {
         app: 'live',
         hls: true,
         hlsFlags: 'hls_time=2:hls_list_size=3:hls_flags=delete_segments',
-        hlsKeep: false, // Lösche alte Segmente automatisch
-        hlsPath: path.join(mediaDir, 'live')
+        hlsKeep: false // Lösche alte Segmente automatisch
+        // hlsPath is relative to mediaroot, so 'live' means mediaDir/live
       }
     ]
   },
@@ -441,15 +463,41 @@ nms.on('donePublish', (id, StreamPath, args) => {
 
 // Listen for transcoding events
 nms.on('preTrans', (id, StreamPath, args) => {
-  console.log('[Transcode] Start:', StreamPath);
+  console.log('[Transcode] ⚡ Start transcoding:', StreamPath, 'ID:', id);
+  console.log('[Transcode] Args:', JSON.stringify(args));
 });
 
 nms.on('postTrans', (id, StreamPath, args) => {
-  console.log('[Transcode] Erfolg:', StreamPath);
+  console.log('[Transcode] ✅ Transcoding success:', StreamPath);
+  const expectedPath = path.join(mediaDir, 'live', StreamPath.replace('/live/', ''), 'index.m3u8');
+  console.log('[Transcode] Expected HLS path:', expectedPath);
+  if (fs.existsSync(expectedPath)) {
+    console.log('[Transcode] ✅ HLS file exists!');
+  } else {
+    console.log('[Transcode] ❌ HLS file NOT found at:', expectedPath);
+  }
 });
 
 nms.on('doneTrans', (id, StreamPath, args) => {
-  console.log('[Transcode] Beendet:', StreamPath);
+  console.log('[Transcode] 🛑 Transcoding stopped:', StreamPath);
+});
+
+// Listen for all Node Media Server events to debug
+nms.on('preConnect', (id, args) => {
+  console.log('[NMS] preConnect:', id, args);
+});
+
+nms.on('postConnect', (id, args) => {
+  console.log('[NMS] postConnect:', id, args);
+});
+
+nms.on('prePublish', (id, StreamPath, args) => {
+  console.log('[NMS] prePublish:', id, StreamPath, args);
+});
+
+nms.on('postPublish', (id, StreamPath, args) => {
+  console.log('[NMS] postPublish:', id, StreamPath, args);
+  console.log('[NMS] Checking if trans config matches app "live"');
 });
 
 // Proxy für HLS-Stream von NodeMediaServer zu Express
@@ -565,12 +613,16 @@ app.use('/live', (req, res, next) => {
 });
 
 // Server starten
-nms.run();
 console.log('═══════════════════════════════════════════');
-console.log('   🚀 Node Media Server gestartet');
+console.log('   🚀 Starte Node Media Server...');
 console.log(`   📡 RTMP Port: ${RTMP_PORT}`);
 console.log(`   📺 Internal HTTP: 8888`);
+console.log(`   🎬 FFmpeg Path: ${ffmpegPath}`);
+console.log(`   📁 Media Root: ${mediaDir}`);
+console.log(`   🎥 Trans Config:`, JSON.stringify(config.trans, null, 2));
 console.log('═══════════════════════════════════════════');
+
+nms.run();
 
 app.listen(HTTP_PORT, '0.0.0.0', () => {
   console.log('═══════════════════════════════════════════');
