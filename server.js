@@ -28,7 +28,7 @@ app.get('/', (req, res) => {
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>Audio Stream</title>
-      <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+      <script src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
       <style>
         * {
           margin: 0;
@@ -143,9 +143,9 @@ app.get('/', (req, res) => {
             ⏳ Warte auf Stream...
           </div>
           
-          <audio id="audioPlayer" controls>
-            Dein Browser unterstützt kein Audio-Element.
-          </audio>
+          <video id="audioPlayer" controls style="width: 100%; max-height: 60px;">
+            Dein Browser unterstützt diesen Player nicht.
+          </video>
           
           <button id="playBtn">▶️ Stream starten</button>
           
