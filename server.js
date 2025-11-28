@@ -1,12 +1,20 @@
 const express = require('express');
 const NodeMediaServer = require('node-media-server');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
-const HTTP_PORT = process.env.PORT || 8080;
-const RTMP_PORT = process.env.RTMP_PORT || 1935;
+const HTTP_PORT = process.env.PORT || 3000;
+const RTMP_PORT = 1935;
 
-// Statische Dateien für den Web-Player
-app.use(express.static('public'));
+// Media-Verzeichnis erstellen
+const mediaDir = path.join(__dirname, 'media');
+if (!fs.existsSync(mediaDir)) {
+  fs.mkdirSync(mediaDir, { recursive: true });
+}
+
+// Statische Dateien
+app.use('/media', express.static(mediaDir));
 
 // Hauptseite mit Player
 app.get('/', (req, res) => {
@@ -90,9 +98,12 @@ app.get('/', (req, res) => {
           background: #f8f9fa;
           border-radius: 5px;
           word-break: break-all;
+          font-size: 14px;
         }
         .info-item strong {
           color: #495057;
+          display: block;
+          margin-bottom: 5px;
         }
         button {
           background: #667eea;
@@ -113,6 +124,14 @@ app.get('/', (req, res) => {
           background: #ccc;
           cursor: not-allowed;
         }
+        .note {
+          background: #e7f3ff;
+          border-left: 4px solid #2196F3;
+          padding: 12px;
+          margin-top: 15px;
+          border-radius: 4px;
+          font-size: 13px;
+        }
       </style>
     </head>
     <body>
@@ -129,30 +148,39 @@ app.get('/', (req, res) => {
           </audio>
           
           <button id="playBtn">▶️ Stream starten</button>
+          
+          <div class="note">
+            💡 <strong>Hinweis:</strong> Der Stream muss in OBS aktiv sein, damit du etwas hörst.
+          </div>
         </div>
 
         <div class="info-card">
           <h3>📡 OBS Einstellungen</h3>
           <div class="info-item">
-            <strong>Service:</strong> Benutzerdefiniert
+            <strong>Service:</strong>
+            Benutzerdefiniert
           </div>
           <div class="info-item">
-            <strong>Server:</strong> rtmp://${host.split(':')[0]}:${RTMP_PORT}/live
+            <strong>Server:</strong>
+            rtmp://turntable.proxy.rlwy.net:43644/live
           </div>
           <div class="info-item">
-            <strong>Stream-Key:</strong> stream
+            <strong>Stream-Schlüssel:</strong>
+            stream
+          </div>
+          <div class="note">
+            ⚙️ In OBS: Einstellungen → Stream → Diese Daten eingeben
           </div>
         </div>
 
         <div class="info-card">
-          <h3>🔗 Stream-URLs</h3>
+          <h3>🔗 Direkter Stream-Link</h3>
           <div class="info-item">
-            <strong>HLS (empfohlen):</strong><br>
-            ${protocol}://${host}/live/stream/index.m3u8
-          </div>
-          <div class="info-item">
-            <strong>FLV:</strong><br>
+            <strong>FLV (für VLC Player):</strong>
             ${protocol}://${host}/live/stream.flv
+          </div>
+          <div class="note">
+            📱 Dieser Link funktioniert auch in VLC Media Player auf dem Handy
           </div>
         </div>
       </div>
@@ -161,39 +189,24 @@ app.get('/', (req, res) => {
         const video = document.getElementById('audioPlayer');
         const status = document.getElementById('status');
         const playBtn = document.getElementById('playBtn');
-        const streamUrl = '${protocol}://${host}/live/stream/index.m3u8';
+        const streamUrl = '${protocol}://${host}/live/stream.flv';
 
-        let hls;
+        let isPlaying = false;
 
         playBtn.addEventListener('click', () => {
-          if (Hls.isSupported()) {
-            hls = new Hls({
-              enableWorker: true,
-              lowLatencyMode: true,
-            });
-            hls.loadSource(streamUrl);
-            hls.attachMedia(video);
-            
-            hls.on(Hls.Events.MANIFEST_PARSED, () => {
-              video.play().catch(e => {
-                status.className = 'status error';
-                status.textContent = '❌ Fehler beim Abspielen';
-              });
-            });
-
-            hls.on(Hls.Events.ERROR, (event, data) => {
-              if (data.fatal) {
-                status.className = 'status error';
-                status.textContent = '❌ Stream nicht verfügbar';
-              }
-            });
-          } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          if (!isPlaying) {
             video.src = streamUrl;
-            video.play();
+            video.load();
+            video.play().catch(e => {
+              console.error('Fehler:', e);
+              status.className = 'status error';
+              status.textContent = '❌ Konnte nicht abspielen - Läuft OBS?';
+            });
+            
+            playBtn.disabled = true;
+            playBtn.textContent = '▶️ Verbinde...';
+            isPlaying = true;
           }
-          
-          playBtn.disabled = true;
-          playBtn.textContent = '▶️ Verbinde...';
         });
 
         video.addEventListener('playing', () => {
@@ -212,19 +225,45 @@ app.get('/', (req, res) => {
           status.textContent = '❌ Stream nicht verfügbar - Startest du OBS?';
           playBtn.disabled = false;
           playBtn.textContent = '🔄 Erneut versuchen';
+          isPlaying = false;
         });
+
+        video.addEventListener('loadstart', () => {
+          status.className = 'status waiting';
+          status.textContent = '⏳ Lade Stream...';
+        });
+
+        // Automatische Reconnect-Logik
+        setInterval(() => {
+          if (video.paused && isPlaying && !video.ended) {
+            console.log('Versuche Reconnect...');
+            video.load();
+            video.play().catch(e => console.log('Reconnect fehlgeschlagen'));
+          }
+        }, 5000);
       </script>
     </body>
     </html>
   `);
 });
 
-// Health check endpoint für Railway
+// Health check
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date() });
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date(),
+    ports: { http: HTTP_PORT, rtmp: RTMP_PORT }
+  });
 });
 
-// Node Media Server Konfiguration
+// API endpoint für Stream-Status
+app.get('/api/stream/status', (req, res) => {
+  res.json({
+    active: nms.getSession ? true : false
+  });
+});
+
+// Node Media Server Konfiguration (OHNE Trans/FFmpeg)
 const config = {
   rtmp: {
     port: RTMP_PORT,
@@ -234,42 +273,84 @@ const config = {
     ping_timeout: 60
   },
   http: {
-    port: HTTP_PORT,
+    port: 8888, // Anderer Port als Express!
     allow_origin: '*',
-    mediaroot: './media'
-  },
-  trans: {
-    ffmpeg: '/usr/bin/ffmpeg',
-    tasks: [
-      {
-        app: 'live',
-        hls: true,
-        hlsFlags: '[hls_time=2:hls_list_size=3:hls_flags=delete_segments]',
-        hlsPath: './media',
-        dash: false
-      }
-    ]
+    mediaroot: mediaDir
   }
+  // Trans/FFmpeg komplett entfernt - nicht nötig für FLV-Streaming
 };
 
 const nms = new NodeMediaServer(config);
 
 // Event Listener
+nms.on('preConnect', (id, args) => {
+  console.log('[RTMP] Client verbindet:', id);
+});
+
+nms.on('postConnect', (id, args) => {
+  console.log('[RTMP] Client verbunden:', id);
+});
+
+nms.on('doneConnect', (id, args) => {
+  console.log('[RTMP] Client getrennt:', id);
+});
+
 nms.on('prePublish', (id, StreamPath, args) => {
-  console.log('[Stream gestartet]', `StreamPath=${StreamPath}`);
+  console.log('[Stream] Gestartet:', StreamPath);
+});
+
+nms.on('postPublish', (id, StreamPath, args) => {
+  console.log('[Stream] Läuft:', StreamPath);
 });
 
 nms.on('donePublish', (id, StreamPath, args) => {
-  console.log('[Stream beendet]', `StreamPath=${StreamPath}`);
+  console.log('[Stream] Beendet:', StreamPath);
+});
+
+// Proxy für FLV-Stream von NodeMediaServer zu Express
+app.get('/live/:stream.flv', (req, res) => {
+  const streamName = req.params.stream;
+  const flvUrl = `http://localhost:8888/live/${streamName}.flv`;
+  
+  const http = require('http');
+  
+  const proxyReq = http.get(flvUrl, (proxyRes) => {
+    res.writeHead(proxyRes.statusCode, {
+      'Content-Type': 'video/x-flv',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Connection': 'keep-alive'
+    });
+    
+    proxyRes.pipe(res);
+    
+    proxyRes.on('error', (err) => {
+      console.error('Proxy Stream Error:', err);
+      res.status(500).end();
+    });
+  });
+  
+  proxyReq.on('error', (err) => {
+    console.error('Stream nicht verfügbar:', err.message);
+    res.status(503).send('Stream nicht verfügbar - Startet OBS?');
+  });
+  
+  req.on('close', () => {
+    proxyReq.destroy();
+  });
 });
 
 // Server starten
 nms.run();
+console.log('═══════════════════════════════════════════');
+console.log('   🚀 Node Media Server gestartet');
+console.log(`   📡 RTMP Port: ${RTMP_PORT}`);
+console.log(`   📺 Internal HTTP: 8888`);
+console.log('═══════════════════════════════════════════');
+
 app.listen(HTTP_PORT, '0.0.0.0', () => {
   console.log('═══════════════════════════════════════════');
-  console.log('   🚀 Audio Streaming Server läuft!');
-  console.log('═══════════════════════════════════════════');
-  console.log(`📺 HTTP Port: ${HTTP_PORT}`);
-  console.log(`📡 RTMP Port: ${RTMP_PORT}`);
+  console.log('   ✅ Express Server läuft!');
+  console.log(`   🌐 HTTP Port: ${HTTP_PORT}`);
   console.log('═══════════════════════════════════════════');
 });
