@@ -538,16 +538,16 @@ function startFFmpegTranscoding(streamPath, streamName) {
     fs.mkdirSync(streamDir, { recursive: true, mode: 0o755 });
   }
   
-  // Use HTTP-FLV from Node Media Server as input (more reliable than RTMP loopback)
+  // Use HTTP-FLV from Node Media Server as input
   const flvInput = `http://127.0.0.1:8888${streamPath}.flv`;
   
-  // FFmpeg command for HLS transcoding
+  // FFmpeg command for HLS transcoding - use copy to avoid re-encoding
   const ffmpegArgs = [
     '-i', flvInput,
-    '-fflags', 'nobuffer',
+    '-fflags', 'nobuffer+genpts',
     '-flags', 'low_delay',
-    '-c:v', 'libx264',
-    '-c:a', 'aac',
+    '-c:v', 'copy',  // Copy video (H264) - no re-encoding
+    '-c:a', 'copy',  // Copy audio (AAC) - no re-encoding
     '-f', 'hls',
     '-hls_time', '2',
     '-hls_list_size', '3',
@@ -593,10 +593,17 @@ function startFFmpegTranscoding(streamPath, streamName) {
   setTimeout(() => {
     if (fs.existsSync(hlsPath)) {
       console.log('[FFmpeg] ✅✅✅ HLS file created! ✅✅✅');
+      const files = fs.readdirSync(streamDir);
+      console.log('[FFmpeg] Files in directory:', files);
     } else {
       console.log('[FFmpeg] ⚠️  HLS file not yet created, may need more time');
+      console.log('[FFmpeg] Checking if directory exists:', streamDir);
+      if (fs.existsSync(streamDir)) {
+        const files = fs.readdirSync(streamDir);
+        console.log('[FFmpeg] Files in directory:', files);
+      }
     }
-  }, 5000);
+  }, 10000); // Increased to 10 seconds
 }
 
 // Catch uncaught exceptions from Node Media Server
