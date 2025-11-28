@@ -273,10 +273,11 @@ const config = {
     ping_timeout: 60
   },
   http: {
-    port: 8888, // Anderer Port als Express!
+    port: 8888,
     allow_origin: '*',
     mediaroot: mediaDir
-  }
+  },
+  logType: 3 // Mehr detaillierte Logs
   // Trans/FFmpeg komplett entfernt - nicht nötig für FLV-Streaming
 };
 
@@ -310,32 +311,58 @@ nms.on('donePublish', (id, StreamPath, args) => {
 // Proxy für FLV-Stream von NodeMediaServer zu Express
 app.get('/live/:stream.flv', (req, res) => {
   const streamName = req.params.stream;
-  const flvUrl = `http://localhost:8888/live/${streamName}.flv`;
+  const flvUrl = `http://127.0.0.1:8888/live/${streamName}.flv`;
+  
+  console.log('[Proxy] Stream angefordert:', streamName);
   
   const http = require('http');
   
+  // Setze Headers vor dem Proxy
+  res.setHeader('Content-Type', 'video/x-flv');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Transfer-Encoding', 'chunked');
+  
   const proxyReq = http.get(flvUrl, (proxyRes) => {
-    res.writeHead(proxyRes.statusCode, {
-      'Content-Type': 'video/x-flv',
-      'Access-Control-Allow-Origin': '*',
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
-      'Connection': 'keep-alive'
-    });
+    console.log('[Proxy] Verbunden mit internem Stream, Status:', proxyRes.statusCode);
     
-    proxyRes.pipe(res);
+    if (proxyRes.statusCode !== 200) {
+      console.error('[Proxy] Fehler Status:', proxyRes.statusCode);
+      res.status(503).send('Stream nicht verfügbar');
+      return;
+    }
+    
+    // Pipe den Stream direkt durch
+    proxyRes.pipe(res, { end: true });
     
     proxyRes.on('error', (err) => {
-      console.error('Proxy Stream Error:', err);
-      res.status(500).end();
+      console.error('[Proxy] Stream Error:', err.message);
+      if (!res.headersSent) {
+        res.status(500).end();
+      }
+    });
+    
+    proxyRes.on('end', () => {
+      console.log('[Proxy] Stream beendet');
     });
   });
   
   proxyReq.on('error', (err) => {
-    console.error('Stream nicht verfügbar:', err.message);
-    res.status(503).send('Stream nicht verfügbar - Startet OBS?');
+    console.error('[Proxy] Verbindungsfehler:', err.message);
+    if (!res.headersSent) {
+      res.status(503).send('Stream nicht verfügbar - Läuft OBS?');
+    }
   });
   
+  // Cleanup bei Client-Disconnect
   req.on('close', () => {
+    console.log('[Proxy] Client getrennt, beende Proxy');
+    proxyReq.destroy();
+  });
+  
+  req.on('error', (err) => {
+    console.error('[Proxy] Request Error:', err.message);
     proxyReq.destroy();
   });
 });
