@@ -411,7 +411,7 @@ app.get('/api/stream/status', (req, res) => {
 });
 
 // Find FFmpeg path - Docker installs it at /usr/bin/ffmpeg
-const { execSync } = require('child_process');
+const { execSync, spawn } = require('child_process');
 let ffmpegPath = '/usr/bin/ffmpeg'; // Default for Docker
 let ffmpegFound = false;
 
@@ -501,22 +501,115 @@ const config = {
     allow_origin: '*',
     mediaroot: mediaDir
   },
-  trans: {
-    ffmpeg: ffmpegPath,
-    tasks: [
-      {
-        app: 'live',
-        hls: true,
-        hlsFlags: '[hls_time=2:hls_list_size=3:hls_flags=delete_segments]',
-        hlsKeep: false
-        // hlsPath is relative to mediaroot, so it will be mediaDir/live
-      }
-    ]
-  },
+  // Temporarily disable trans to avoid the "version is not defined" bug
+  // We'll implement custom FFmpeg transcoding instead
+  // trans: {
+  //   ffmpeg: ffmpegPath,
+  //   tasks: [
+  //     {
+  //       app: 'live',
+  //       hls: true,
+  //       hlsFlags: '[hls_time=2:hls_list_size=3:hls_flags=delete_segments]',
+  //       hlsKeep: false
+  //     }
+  //   ]
+  // },
   logType: 3
 };
 
 const nms = new NodeMediaServer(config);
+
+// Store active FFmpeg processes
+const ffmpegProcesses = new Map();
+
+// Custom FFmpeg transcoding function
+function startFFmpegTranscoding(streamPath, streamName) {
+  const streamDir = path.join(mediaDir, 'live', streamName);
+  const hlsPath = path.join(streamDir, 'index.m3u8');
+  
+  // Don't start if already running
+  if (ffmpegProcesses.has(streamPath)) {
+    console.log('[FFmpeg] Transcoding already running for:', streamPath);
+    return;
+  }
+  
+  // Ensure directory exists
+  if (!fs.existsSync(streamDir)) {
+    fs.mkdirSync(streamDir, { recursive: true, mode: 0o755 });
+  }
+  
+  // Use HTTP-FLV from Node Media Server as input (more reliable than RTMP loopback)
+  const flvInput = `http://127.0.0.1:8888${streamPath}.flv`;
+  
+  // FFmpeg command for HLS transcoding
+  const ffmpegArgs = [
+    '-i', flvInput,
+    '-fflags', 'nobuffer',
+    '-flags', 'low_delay',
+    '-c:v', 'libx264',
+    '-c:a', 'aac',
+    '-f', 'hls',
+    '-hls_time', '2',
+    '-hls_list_size', '3',
+    '-hls_flags', 'delete_segments',
+    '-hls_segment_filename', path.join(streamDir, 'segment_%03d.ts'),
+    hlsPath
+  ];
+  
+  console.log('[FFmpeg] 🚀 Starting transcoding for:', streamPath);
+  console.log('[FFmpeg] Command:', ffmpegPath, ffmpegArgs.join(' '));
+  
+  const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  
+  ffmpegProcesses.set(streamPath, ffmpeg);
+  
+  ffmpeg.stdout.on('data', (data) => {
+    console.log('[FFmpeg] stdout:', data.toString());
+  });
+  
+  ffmpeg.stderr.on('data', (data) => {
+    const output = data.toString();
+    // FFmpeg writes to stderr for progress
+    if (output.includes('frame=') || output.includes('time=')) {
+      // Progress output - can be logged if needed
+    } else {
+      console.log('[FFmpeg] stderr:', output);
+    }
+  });
+  
+  ffmpeg.on('error', (err) => {
+    console.error('[FFmpeg] Process error:', err);
+    ffmpegProcesses.delete(streamPath);
+  });
+  
+  ffmpeg.on('exit', (code, signal) => {
+    console.log(`[FFmpeg] Process exited: code=${code}, signal=${signal}`);
+    ffmpegProcesses.delete(streamPath);
+  });
+  
+  // Wait a bit and check if file is created
+  setTimeout(() => {
+    if (fs.existsSync(hlsPath)) {
+      console.log('[FFmpeg] ✅✅✅ HLS file created! ✅✅✅');
+    } else {
+      console.log('[FFmpeg] ⚠️  HLS file not yet created, may need more time');
+    }
+  }, 5000);
+}
+
+// Catch uncaught exceptions from Node Media Server
+process.on('uncaughtException', (err) => {
+  if (err.message && err.message.includes('version is not defined')) {
+    console.error('[NMS] ⚠️  Trans server error (known bug in node-media-server)');
+    console.error('[NMS] Using custom FFmpeg transcoding instead');
+    // Don't exit - let the server continue with custom transcoding
+    return;
+  }
+  // Re-throw other errors
+  throw err;
+});
 
 // Event Listener
 nms.on('preConnect', (id, args) => {
@@ -546,25 +639,36 @@ nms.on('prePublish', (id, StreamPath, args) => {
 
 nms.on('postPublish', (id, StreamPath, args) => {
   console.log('[Stream] Läuft:', StreamPath);
-  console.log('[Stream] HLS sollte erstellt werden in:', path.join(mediaDir, 'live', StreamPath.replace('/live/', ''), 'index.m3u8'));
   
-  // Ensure stream directory exists
   const streamName = StreamPath.replace('/live/', '');
   const streamDir = path.join(mediaDir, 'live', streamName);
+  
+  // Ensure stream directory exists
   if (!fs.existsSync(streamDir)) {
     fs.mkdirSync(streamDir, { recursive: true, mode: 0o755 });
     console.log('[Stream] Created stream directory:', streamDir);
   }
   
-  // Check if transcoding should start
-  console.log('[Stream] Checking trans config...');
-  console.log('[Stream] Trans enabled:', !!config.trans);
-  console.log('[Stream] FFmpeg path:', config.trans?.ffmpeg);
-  console.log('[Stream] Tasks:', JSON.stringify(config.trans?.tasks, null, 2));
+  // Start custom FFmpeg transcoding
+  if (StreamPath.startsWith('/live/')) {
+    console.log('[Stream] Starting custom FFmpeg transcoding...');
+    // Wait a moment for RTMP stream to be ready
+    setTimeout(() => {
+      startFFmpegTranscoding(StreamPath, streamName);
+    }, 2000);
+  }
 });
 
 nms.on('donePublish', (id, StreamPath, args) => {
   console.log('[Stream] Beendet:', StreamPath);
+  
+  // Stop FFmpeg transcoding for this stream
+  if (ffmpegProcesses.has(StreamPath)) {
+    const ffmpeg = ffmpegProcesses.get(StreamPath);
+    console.log('[FFmpeg] Stopping transcoding for:', StreamPath);
+    ffmpeg.kill();
+    ffmpegProcesses.delete(StreamPath);
+  }
 });
 
 // Listen for transcoding events
