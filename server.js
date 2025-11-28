@@ -327,11 +327,29 @@ app.get('/api/stream/status', (req, res) => {
   const streamPath = path.join(mediaDir, 'live', 'stream', 'index.m3u8');
   const streamExists = fs.existsSync(streamPath);
   
+  // Check directory structure
+  const liveDir = path.join(mediaDir, 'live');
+  const streamDir = path.join(mediaDir, 'live', 'stream');
+  const liveDirExists = fs.existsSync(liveDir);
+  const streamDirExists = fs.existsSync(streamDir);
+  
+  let files = [];
+  if (streamDirExists) {
+    try {
+      files = fs.readdirSync(streamDir);
+    } catch (e) {
+      // Ignore
+    }
+  }
+  
   res.json({
     active: nms.getSession ? true : false,
     hlsExists: streamExists,
     hlsPath: streamPath,
-    mediaDir: mediaDir
+    mediaDir: mediaDir,
+    liveDirExists: liveDirExists,
+    streamDirExists: streamDirExists,
+    files: files
   });
 });
 
@@ -435,14 +453,11 @@ nms.on('doneTrans', (id, StreamPath, args) => {
 });
 
 // Proxy für HLS-Stream von NodeMediaServer zu Express
-// Proxying to Node Media Server's HTTP server which serves HLS files correctly
+// Try Node Media Server HTTP server first, then fallback to direct file serving
 app.use('/live', (req, res, next) => {
   const http = require('http');
-  const targetUrl = `http://127.0.0.1:8888${req.path}`;
   
-  console.log('[HLS Proxy] Request:', req.path, '->', targetUrl);
-  
-  // Set CORS headers
+  // Set CORS headers first
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -461,7 +476,40 @@ app.use('/live', (req, res, next) => {
     res.setHeader('Cache-Control', 'public, max-age=3600');
   }
   
+  // Try Node Media Server HTTP server first
+  const targetUrl = `http://127.0.0.1:8888${req.path}`;
+  console.log('[HLS Proxy] Request:', req.path, '->', targetUrl);
+  
   const proxyReq = http.get(targetUrl, (proxyRes) => {
+    console.log('[HLS Proxy] Response status:', proxyRes.statusCode, 'for', req.path);
+    
+    if (proxyRes.statusCode === 404) {
+      // Try direct file serving as fallback
+      console.log('[HLS Proxy] 404 from NMS, trying direct file serving...');
+      proxyReq.destroy();
+      
+      // Extract stream name from path like /live/stream/index.m3u8
+      const pathParts = req.path.split('/').filter(p => p);
+      if (pathParts.length >= 2) {
+        const streamName = pathParts[0];
+        const fileName = pathParts.slice(1).join('/');
+        const filePath = path.join(mediaDir, 'live', streamName, fileName);
+        
+        console.log('[HLS Proxy] Trying direct file:', filePath);
+        
+        if (fs.existsSync(filePath)) {
+          console.log('[HLS Proxy] ✅ File exists, serving directly');
+          res.sendFile(filePath);
+          return;
+        } else {
+          console.log('[HLS Proxy] ❌ File does not exist:', filePath);
+        }
+      }
+      
+      res.status(404).send('Stream nicht gefunden - Warte auf HLS-Generierung...');
+      return;
+    }
+    
     // Forward status code
     res.status(proxyRes.statusCode);
     
@@ -489,6 +537,23 @@ app.use('/live', (req, res, next) => {
   
   proxyReq.on('error', (err) => {
     console.error('[HLS Proxy] Request error:', err.message);
+    
+    // Fallback to direct file serving
+    const pathParts = req.path.split('/').filter(p => p);
+    if (pathParts.length >= 2) {
+      const streamName = pathParts[0];
+      const fileName = pathParts.slice(1).join('/');
+      const filePath = path.join(mediaDir, 'live', streamName, fileName);
+      
+      console.log('[HLS Proxy] Connection error, trying direct file:', filePath);
+      
+      if (fs.existsSync(filePath)) {
+        console.log('[HLS Proxy] ✅ File exists, serving directly');
+        res.sendFile(filePath);
+        return;
+      }
+    }
+    
     if (!res.headersSent) {
       res.status(503).send('Stream nicht verfügbar - Läuft OBS?');
     }
