@@ -30,7 +30,7 @@ app.get('/', (req, res) => {
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>Audio Stream</title>
-      <script src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
+      <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
       <style>
         * {
           margin: 0;
@@ -178,11 +178,11 @@ app.get('/', (req, res) => {
         <div class="info-card">
           <h3>🔗 Direkter Stream-Link</h3>
           <div class="info-item">
-            <strong>HTTP-FLV (für VLC Player):</strong>
-            ${protocol}://${host}/live/stream.flv
+            <strong>HLS (für alle Browser & VLC):</strong>
+            ${protocol}://${host}/live/stream/index.m3u8
           </div>
           <div class="note">
-            📱 Dieser Link funktioniert in VLC Media Player. Für Browser wird flv.js verwendet.
+            📱 Dieser Link funktioniert in allen Browsern (inkl. Mobile) und VLC Media Player
           </div>
         </div>
       </div>
@@ -191,10 +191,10 @@ app.get('/', (req, res) => {
         const video = document.getElementById('audioPlayer');
         const status = document.getElementById('status');
         const playBtn = document.getElementById('playBtn');
-        const streamUrl = '${protocol}://${host}/live/stream.flv';
+        const streamUrl = '${protocol}://${host}/live/stream/index.m3u8';
 
         let isPlaying = false;
-        let flvPlayer = null;
+        let hls = null;
 
         playBtn.addEventListener('click', () => {
           if (!isPlaying) {
@@ -203,39 +203,61 @@ app.get('/', (req, res) => {
             playBtn.disabled = true;
             playBtn.textContent = '▶️ Verbinde...';
             
-            // Verwende flv.js für FLV-Streaming
-            if (typeof flvjs !== 'undefined' && flvjs.isSupported()) {
-              if (flvPlayer) {
-                flvPlayer.destroy();
+            // Verwende HLS.js für bessere Kompatibilität (funktioniert auch auf Mobile)
+            if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+              if (hls) {
+                hls.destroy();
               }
               
-              flvPlayer = flvjs.createPlayer({
-                type: 'flv',
-                url: streamUrl,
-                isLive: true,
-                hasAudio: true,
-                hasVideo: true
+              hls = new Hls({
+                enableWorker: true,
+                lowLatencyMode: true,
+                backBufferLength: 90
               });
               
-              flvPlayer.attachMediaElement(video);
-              flvPlayer.load();
+              hls.loadSource(streamUrl);
+              hls.attachMedia(video);
               
-              flvPlayer.on(flvjs.Events.LOADING_COMPLETE, () => {
-                console.log('Stream geladen');
+              hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                video.play().then(() => {
+                  isPlaying = true;
+                }).catch(e => {
+                  console.error('Fehler:', e);
+                  status.className = 'status error';
+                  status.textContent = '❌ Konnte nicht abspielen - Läuft OBS?';
+                  playBtn.disabled = false;
+                  playBtn.textContent = '🔄 Erneut versuchen';
+                });
               });
               
-              flvPlayer.on(flvjs.Events.RECOVERED_EARLY_EOF, () => {
-                console.log('Stream wiederhergestellt');
+              hls.on(Hls.Events.ERROR, (event, data) => {
+                if (data.fatal) {
+                  console.error('HLS Error:', data);
+                  switch(data.type) {
+                    case Hls.ErrorTypes.NETWORK_ERROR:
+                      status.className = 'status error';
+                      status.textContent = '❌ Netzwerk-Fehler - Läuft OBS?';
+                      hls.startLoad();
+                      break;
+                    case Hls.ErrorTypes.MEDIA_ERROR:
+                      status.className = 'status error';
+                      status.textContent = '❌ Stream-Fehler - Läuft OBS?';
+                      hls.recoverMediaError();
+                      break;
+                    default:
+                      status.className = 'status error';
+                      status.textContent = '❌ Stream-Fehler - Läuft OBS?';
+                      playBtn.disabled = false;
+                      playBtn.textContent = '🔄 Erneut versuchen';
+                      isPlaying = false;
+                      break;
+                  }
+                }
               });
-              
-              flvPlayer.on(flvjs.Events.ERROR, (errorType, errorDetail, errorInfo) => {
-                console.error('FLV Error:', errorType, errorDetail, errorInfo);
-                status.className = 'status error';
-                status.textContent = '❌ Stream-Fehler - Läuft OBS?';
-                playBtn.disabled = false;
-                playBtn.textContent = '🔄 Erneut versuchen';
-                isPlaying = false;
-              });
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+              // Native HLS (Safari/iOS)
+              video.src = streamUrl;
+              video.load();
               
               video.play().then(() => {
                 isPlaying = true;
@@ -248,7 +270,7 @@ app.get('/', (req, res) => {
               });
             } else {
               status.className = 'status error';
-              status.textContent = '❌ Browser unterstützt FLV nicht (flv.js fehlt)';
+              status.textContent = '❌ Browser unterstützt HLS nicht';
               playBtn.disabled = false;
               playBtn.textContent = '🔄 Erneut versuchen';
             }
@@ -282,8 +304,8 @@ app.get('/', (req, res) => {
 
         // Cleanup beim Verlassen
         window.addEventListener('beforeunload', () => {
-          if (flvPlayer) {
-            flvPlayer.destroy();
+          if (hls) {
+            hls.destroy();
           }
         });
       </script>
@@ -332,7 +354,51 @@ app.get('/api/stream/status', (req, res) => {
   });
 });
 
-// Node Media Server Konfiguration - OHNE Transcoding (HTTP-FLV funktioniert ohne FFmpeg)
+// Find FFmpeg path - Railway/nixpacks installs it via apt
+const { execSync, spawn } = require('child_process');
+let ffmpegPath = 'ffmpeg';
+
+// Try to find FFmpeg in common locations
+const possiblePaths = [
+  'ffmpeg', // PATH
+  '/usr/bin/ffmpeg', // Standard Linux
+  '/usr/local/bin/ffmpeg', // Alternative
+  '/bin/ffmpeg' // Sometimes here
+];
+
+let ffmpegFound = false;
+for (const testPath of possiblePaths) {
+  try {
+    // Quick test - just check if command exists and is executable
+    execSync(`command -v ${testPath} > /dev/null 2>&1 || which ${testPath} > /dev/null 2>&1`, { 
+      stdio: 'ignore',
+      timeout: 1000
+    });
+    // If that worked, try to get version
+    const result = execSync(`${testPath} -version 2>&1 | head -n 1`, { 
+      encoding: 'utf8',
+      timeout: 2000,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    if (result && result.trim()) {
+      ffmpegPath = testPath;
+      ffmpegFound = true;
+      console.log(`[FFmpeg] ✅ Found: ${ffmpegPath}`);
+      console.log(`[FFmpeg] Version: ${result.trim()}`);
+      break;
+    }
+  } catch (e) {
+    // Try next path
+    continue;
+  }
+}
+
+if (!ffmpegFound) {
+  console.warn('[FFmpeg] ⚠️  Could not verify FFmpeg, will try anyway');
+  console.warn('[FFmpeg] This may cause HLS transcoding to fail');
+}
+
+// Node Media Server Konfiguration mit HLS-Transcoding
 const config = {
   rtmp: {
     port: RTMP_PORT,
@@ -346,8 +412,18 @@ const config = {
     allow_origin: '*',
     mediaroot: mediaDir
   },
-  // Kein trans config - HTTP-FLV funktioniert ohne FFmpeg
-  logType: 3 // Mehr detaillierte Logs
+  trans: {
+    ffmpeg: ffmpegPath,
+    tasks: [
+      {
+        app: 'live',
+        hls: true,
+        hlsFlags: 'hls_time=2:hls_list_size=3:hls_flags=delete_segments',
+        hlsKeep: false
+      }
+    ]
+  },
+  logType: 3
 };
 
 const nms = new NodeMediaServer(config);
@@ -417,110 +493,114 @@ nms.on('postPublish', (id, StreamPath, args) => {
   console.log('[NMS] Checking if trans config matches app "live"');
 });
 
-// Proxy für HTTP-FLV Stream von NodeMediaServer zu Express
-// HTTP-FLV funktioniert ohne FFmpeg - Node Media Server serviert es direkt
-app.get('/live/:streamName([^/]+)\\.flv', (req, res) => {
-  const streamName = req.params.streamName;
-  const flvUrl = `http://127.0.0.1:8888/live/${streamName}.flv`;
-  
-  console.log('[FLV Proxy] Request:', streamName, '->', flvUrl);
-  
+// Proxy für HLS-Stream von NodeMediaServer zu Express
+app.use('/live', (req, res, next) => {
   const http = require('http');
   
-  // Setze Headers
-  res.setHeader('Content-Type', 'video/x-flv');
+  // Set CORS headers first
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   
-  let isAborted = false;
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+    return;
+  }
   
-  const proxyReq = http.get(flvUrl, (proxyRes) => {
-    console.log('[FLV Proxy] Response status:', proxyRes.statusCode, 'for', streamName);
+  // Set appropriate content type based on file extension
+  if (req.path.endsWith('.m3u8')) {
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  } else if (req.path.endsWith('.ts')) {
+    res.setHeader('Content-Type', 'video/mp2t');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+  }
+  
+  // Try Node Media Server HTTP server first
+  const targetUrl = `http://127.0.0.1:8888${req.path}`;
+  console.log('[HLS Proxy] Request:', req.path, '->', targetUrl);
+  
+  const proxyReq = http.get(targetUrl, (proxyRes) => {
+    console.log('[HLS Proxy] Response status:', proxyRes.statusCode, 'for', req.path);
     
-    if (isAborted) {
-      proxyRes.destroy();
+    if (proxyRes.statusCode === 404) {
+      // Try direct file serving as fallback
+      console.log('[HLS Proxy] 404 from NMS, trying direct file serving...');
+      proxyReq.destroy();
+      
+      // Extract stream name from path like /live/stream/index.m3u8
+      const pathParts = req.path.split('/').filter(p => p);
+      if (pathParts.length >= 2) {
+        const streamName = pathParts[0];
+        const fileName = pathParts.slice(1).join('/');
+        const filePath = path.join(mediaDir, 'live', streamName, fileName);
+        
+        console.log('[HLS Proxy] Trying direct file:', filePath);
+        
+        if (fs.existsSync(filePath)) {
+          console.log('[HLS Proxy] ✅ File exists, serving directly');
+          res.sendFile(filePath);
+          return;
+        } else {
+          console.log('[HLS Proxy] ❌ File does not exist:', filePath);
+        }
+      }
+      
+      res.status(404).send('Stream nicht gefunden - Warte auf HLS-Generierung...');
       return;
     }
     
-    if (proxyRes.statusCode !== 200) {
-      console.error('[FLV Proxy] Fehler Status:', proxyRes.statusCode);
-      if (!res.headersSent) {
-        res.status(503).send('Stream nicht verfügbar - Läuft OBS?');
-      }
-      return;
-    }
+    // Forward status code
+    res.status(proxyRes.statusCode);
     
-    res.status(200);
-    
-    // Pipe den Stream direkt durch
-    proxyRes.on('data', (chunk) => {
-      if (!isAborted && !res.destroyed) {
-        res.write(chunk);
+    // Forward headers
+    Object.keys(proxyRes.headers).forEach(key => {
+      // Don't override our CORS and content-type headers
+      if (key.toLowerCase() !== 'access-control-allow-origin' && 
+          key.toLowerCase() !== 'content-type') {
+        res.setHeader(key, proxyRes.headers[key]);
       }
     });
     
-    proxyRes.on('end', () => {
-      console.log('[FLV Proxy] Stream beendet');
-      if (!isAborted && !res.destroyed) {
-        res.end();
-      }
-    });
+    // Pipe the response
+    proxyRes.pipe(res);
     
     proxyRes.on('error', (err) => {
-      console.error('[FLV Proxy] Stream Error:', err.message);
-      if (!isAborted && !res.headersSent) {
+      console.error('[HLS Proxy] Stream error:', err.message);
+      if (!res.headersSent) {
         res.status(500).end();
-      } else if (!isAborted && !res.destroyed) {
-        res.end();
+      } else {
+        res.destroy();
       }
     });
   });
   
   proxyReq.on('error', (err) => {
-    console.error('[FLV Proxy] Request error:', err.message);
-    if (!isAborted && !res.headersSent) {
+    console.error('[HLS Proxy] Request error:', err.message);
+    
+    // Fallback to direct file serving
+    const pathParts = req.path.split('/').filter(p => p);
+    if (pathParts.length >= 2) {
+      const streamName = pathParts[0];
+      const fileName = pathParts.slice(1).join('/');
+      const filePath = path.join(mediaDir, 'live', streamName, fileName);
+      
+      console.log('[HLS Proxy] Connection error, trying direct file:', filePath);
+      
+      if (fs.existsSync(filePath)) {
+        console.log('[HLS Proxy] ✅ File exists, serving directly');
+        res.sendFile(filePath);
+        return;
+      }
+    }
+    
+    if (!res.headersSent) {
       res.status(503).send('Stream nicht verfügbar - Läuft OBS?');
     }
   });
   
-  // Cleanup bei Client-Disconnect
   req.on('close', () => {
-    if (!isAborted) {
-      console.log('[FLV Proxy] Client getrennt');
-      isAborted = true;
-      proxyReq.destroy();
-      if (!res.destroyed) {
-        res.destroy();
-      }
-    }
-  });
-  
-  req.on('aborted', () => {
-    if (!isAborted) {
-      console.log('[FLV Proxy] Request aborted');
-      isAborted = true;
-      proxyReq.destroy();
-      if (!res.destroyed) {
-        res.destroy();
-      }
-    }
-  });
-  
-  req.on('error', (err) => {
-    if (!isAborted) {
-      console.error('[FLV Proxy] Request Error:', err.message);
-      isAborted = true;
-      proxyReq.destroy();
-    }
-  });
-  
-  res.on('close', () => {
-    if (!isAborted) {
-      console.log('[FLV Proxy] Response geschlossen');
-      isAborted = true;
-      proxyReq.destroy();
-    }
+    proxyReq.destroy();
   });
 });
 
@@ -530,7 +610,8 @@ console.log('   🚀 Starte Node Media Server...');
 console.log(`   📡 RTMP Port: ${RTMP_PORT}`);
 console.log(`   📺 Internal HTTP: 8888`);
 console.log(`   📁 Media Root: ${mediaDir}`);
-console.log(`   🎬 HTTP-FLV Streaming (kein FFmpeg nötig)`);
+console.log(`   🎬 FFmpeg Path: ${ffmpegPath}`);
+console.log(`   🎥 HLS Streaming aktiviert`);
 console.log('═══════════════════════════════════════════');
 
 nms.run();
