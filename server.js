@@ -28,7 +28,7 @@ app.get('/', (req, res) => {
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>Audio Stream</title>
-      <script src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
+      <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
       <style>
         * {
           margin: 0;
@@ -176,11 +176,11 @@ app.get('/', (req, res) => {
         <div class="info-card">
           <h3>🔗 Direkter Stream-Link</h3>
           <div class="info-item">
-            <strong>FLV (für VLC Player):</strong>
-            ${protocol}://${host}/live/stream.flv
+            <strong>HLS (für VLC Player oder Browser):</strong>
+            ${protocol}://${host}/live/stream/index.m3u8
           </div>
           <div class="note">
-            📱 Dieser Link funktioniert auch in VLC Media Player auf dem Handy
+            📱 Dieser Link funktioniert in allen Browsern und VLC Media Player
           </div>
         </div>
       </div>
@@ -189,23 +189,88 @@ app.get('/', (req, res) => {
         const video = document.getElementById('audioPlayer');
         const status = document.getElementById('status');
         const playBtn = document.getElementById('playBtn');
-        const streamUrl = '${protocol}://${host}/live/stream.flv';
+        const streamUrl = '${protocol}://${host}/live/stream/index.m3u8';
 
         let isPlaying = false;
+        let hls = null;
 
         playBtn.addEventListener('click', () => {
           if (!isPlaying) {
-            video.src = streamUrl;
-            video.load();
-            video.play().catch(e => {
-              console.error('Fehler:', e);
-              status.className = 'status error';
-              status.textContent = '❌ Konnte nicht abspielen - Läuft OBS?';
-            });
-            
+            status.className = 'status waiting';
+            status.textContent = '⏳ Verbinde...';
             playBtn.disabled = true;
             playBtn.textContent = '▶️ Verbinde...';
-            isPlaying = true;
+            
+            // Verwende HLS.js für bessere Kompatibilität
+            if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+              if (hls) {
+                hls.destroy();
+              }
+              
+              hls = new Hls({
+                enableWorker: true,
+                lowLatencyMode: true
+              });
+              
+              hls.loadSource(streamUrl);
+              hls.attachMedia(video);
+              
+              hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                video.play().then(() => {
+                  isPlaying = true;
+                }).catch(e => {
+                  console.error('Fehler:', e);
+                  status.className = 'status error';
+                  status.textContent = '❌ Konnte nicht abspielen - Läuft OBS?';
+                  playBtn.disabled = false;
+                  playBtn.textContent = '🔄 Erneut versuchen';
+                });
+              });
+              
+              hls.on(Hls.Events.ERROR, (event, data) => {
+                if (data.fatal) {
+                  console.error('HLS Error:', data);
+                  switch(data.type) {
+                    case Hls.ErrorTypes.NETWORK_ERROR:
+                      status.className = 'status error';
+                      status.textContent = '❌ Netzwerk-Fehler - Läuft OBS?';
+                      hls.startLoad();
+                      break;
+                    case Hls.ErrorTypes.MEDIA_ERROR:
+                      status.className = 'status error';
+                      status.textContent = '❌ Stream-Fehler - Läuft OBS?';
+                      hls.recoverMediaError();
+                      break;
+                    default:
+                      status.className = 'status error';
+                      status.textContent = '❌ Stream-Fehler - Läuft OBS?';
+                      playBtn.disabled = false;
+                      playBtn.textContent = '🔄 Erneut versuchen';
+                      isPlaying = false;
+                      break;
+                  }
+                }
+              });
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+              // Native HLS (Safari)
+              video.src = streamUrl;
+              video.load();
+              
+              video.play().then(() => {
+                isPlaying = true;
+              }).catch(e => {
+                console.error('Fehler:', e);
+                status.className = 'status error';
+                status.textContent = '❌ Konnte nicht abspielen - Läuft OBS?';
+                playBtn.disabled = false;
+                playBtn.textContent = '🔄 Erneut versuchen';
+              });
+            } else {
+              status.className = 'status error';
+              status.textContent = '❌ Browser unterstützt HLS nicht';
+              playBtn.disabled = false;
+              playBtn.textContent = '🔄 Erneut versuchen';
+            }
           }
         });
 
@@ -220,7 +285,8 @@ app.get('/', (req, res) => {
           status.textContent = '⏳ Puffern...';
         });
 
-        video.addEventListener('error', () => {
+        video.addEventListener('error', (e) => {
+          console.error('Video Error:', e);
           status.className = 'status error';
           status.textContent = '❌ Stream nicht verfügbar - Startest du OBS?';
           playBtn.disabled = false;
@@ -233,14 +299,12 @@ app.get('/', (req, res) => {
           status.textContent = '⏳ Lade Stream...';
         });
 
-        // Automatische Reconnect-Logik
-        setInterval(() => {
-          if (video.paused && isPlaying && !video.ended) {
-            console.log('Versuche Reconnect...');
-            video.load();
-            video.play().catch(e => console.log('Reconnect fehlgeschlagen'));
+        // Cleanup beim Verlassen
+        window.addEventListener('beforeunload', () => {
+          if (hls) {
+            hls.destroy();
           }
-        }, 5000);
+        });
       </script>
     </body>
     </html>
@@ -263,7 +327,7 @@ app.get('/api/stream/status', (req, res) => {
   });
 });
 
-// Node Media Server Konfiguration (OHNE Trans/FFmpeg)
+// Node Media Server Konfiguration mit HLS-Transcoding
 const config = {
   rtmp: {
     port: RTMP_PORT,
@@ -277,8 +341,18 @@ const config = {
     allow_origin: '*',
     mediaroot: mediaDir
   },
+  trans: {
+    ffmpeg: '/usr/bin/ffmpeg',
+    tasks: [
+      {
+        app: 'live',
+        hls: true,
+        hlsFlags: '[hls_time=2:hls_list_size=3:hls_flags=delete_segments]',
+        hlsKeep: false // Lösche alte Segmente automatisch
+      }
+    ]
+  },
   logType: 3 // Mehr detaillierte Logs
-  // Trans/FFmpeg komplett entfernt - nicht nötig für FLV-Streaming
 };
 
 const nms = new NodeMediaServer(config);
@@ -308,64 +382,20 @@ nms.on('donePublish', (id, StreamPath, args) => {
   console.log('[Stream] Beendet:', StreamPath);
 });
 
-// Proxy für FLV-Stream von NodeMediaServer zu Express
-app.get('/live/:stream.flv', (req, res) => {
-  const streamName = req.params.stream;
-  const flvUrl = `http://127.0.0.1:8888/live/${streamName}.flv`;
-  
-  console.log('[Proxy] Stream angefordert:', streamName);
-  
-  const http = require('http');
-  
-  // Setze Headers vor dem Proxy
-  res.setHeader('Content-Type', 'video/x-flv');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('Transfer-Encoding', 'chunked');
-  
-  const proxyReq = http.get(flvUrl, (proxyRes) => {
-    console.log('[Proxy] Verbunden mit internem Stream, Status:', proxyRes.statusCode);
-    
-    if (proxyRes.statusCode !== 200) {
-      console.error('[Proxy] Fehler Status:', proxyRes.statusCode);
-      res.status(503).send('Stream nicht verfügbar');
-      return;
+// Proxy für HLS-Stream von NodeMediaServer zu Express
+// HLS wird direkt von Node Media Server bereitgestellt, wir müssen nur die statischen Dateien servieren
+app.use('/live', express.static(mediaDir, {
+  setHeaders: (res, path) => {
+    if (path.endsWith('.m3u8')) {
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    } else if (path.endsWith('.ts')) {
+      res.setHeader('Content-Type', 'video/mp2t');
+      res.setHeader('Cache-Control', 'public, max-age=3600');
     }
-    
-    // Pipe den Stream direkt durch
-    proxyRes.pipe(res, { end: true });
-    
-    proxyRes.on('error', (err) => {
-      console.error('[Proxy] Stream Error:', err.message);
-      if (!res.headersSent) {
-        res.status(500).end();
-      }
-    });
-    
-    proxyRes.on('end', () => {
-      console.log('[Proxy] Stream beendet');
-    });
-  });
-  
-  proxyReq.on('error', (err) => {
-    console.error('[Proxy] Verbindungsfehler:', err.message);
-    if (!res.headersSent) {
-      res.status(503).send('Stream nicht verfügbar - Läuft OBS?');
-    }
-  });
-  
-  // Cleanup bei Client-Disconnect
-  req.on('close', () => {
-    console.log('[Proxy] Client getrennt, beende Proxy');
-    proxyReq.destroy();
-  });
-  
-  req.on('error', (err) => {
-    console.error('[Proxy] Request Error:', err.message);
-    proxyReq.destroy();
-  });
-});
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+}));
 
 // Server starten
 nms.run();
