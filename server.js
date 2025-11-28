@@ -9,10 +9,28 @@ app.set('trust proxy', true);
 const HTTP_PORT = process.env.PORT || 3000;
 const RTMP_PORT = 1935;
 
-// Media-Verzeichnis erstellen
+// Media-Verzeichnis erstellen mit korrekten Berechtigungen
 const mediaDir = path.join(__dirname, 'media');
 if (!fs.existsSync(mediaDir)) {
-  fs.mkdirSync(mediaDir, { recursive: true });
+  fs.mkdirSync(mediaDir, { recursive: true, mode: 0o755 });
+  console.log('[Media] Created media directory:', mediaDir);
+} else {
+  console.log('[Media] Media directory exists:', mediaDir);
+}
+
+// Ensure media directory is writable
+try {
+  fs.accessSync(mediaDir, fs.constants.W_OK);
+  console.log('[Media] ✅ Media directory is writable');
+} catch (e) {
+  console.error('[Media] ❌ Media directory is NOT writable:', e.message);
+  // Try to fix permissions
+  try {
+    fs.chmodSync(mediaDir, 0o755);
+    console.log('[Media] Fixed permissions on media directory');
+  } catch (chmodErr) {
+    console.error('[Media] Could not fix permissions:', chmodErr.message);
+  }
 }
 
 // Statische Dateien
@@ -489,10 +507,9 @@ const config = {
       {
         app: 'live',
         hls: true,
-        hlsFlags: 'hls_time=2:hls_list_size=3:hls_flags=delete_segments',
-        hlsKeep: false,
-        // Ensure output path is correct
-        hlsPath: path.join(mediaDir, 'live')
+        hlsFlags: '[hls_time=2:hls_list_size=3:hls_flags=delete_segments]',
+        hlsKeep: false
+        // hlsPath is relative to mediaroot, so it will be mediaDir/live
       }
     ]
   },
@@ -516,11 +533,34 @@ nms.on('doneConnect', (id, args) => {
 
 nms.on('prePublish', (id, StreamPath, args) => {
   console.log('[Stream] Gestartet:', StreamPath);
+  console.log('[Stream] App:', args.app || 'unknown');
+  console.log('[Stream] Trans config app:', config.trans?.tasks?.[0]?.app);
+  
+  // Ensure live directory exists
+  const liveDir = path.join(mediaDir, 'live');
+  if (!fs.existsSync(liveDir)) {
+    fs.mkdirSync(liveDir, { recursive: true, mode: 0o755 });
+    console.log('[Stream] Created live directory:', liveDir);
+  }
 });
 
 nms.on('postPublish', (id, StreamPath, args) => {
   console.log('[Stream] Läuft:', StreamPath);
   console.log('[Stream] HLS sollte erstellt werden in:', path.join(mediaDir, 'live', StreamPath.replace('/live/', ''), 'index.m3u8'));
+  
+  // Ensure stream directory exists
+  const streamName = StreamPath.replace('/live/', '');
+  const streamDir = path.join(mediaDir, 'live', streamName);
+  if (!fs.existsSync(streamDir)) {
+    fs.mkdirSync(streamDir, { recursive: true, mode: 0o755 });
+    console.log('[Stream] Created stream directory:', streamDir);
+  }
+  
+  // Check if transcoding should start
+  console.log('[Stream] Checking trans config...');
+  console.log('[Stream] Trans enabled:', !!config.trans);
+  console.log('[Stream] FFmpeg path:', config.trans?.ffmpeg);
+  console.log('[Stream] Tasks:', JSON.stringify(config.trans?.tasks, null, 2));
 });
 
 nms.on('donePublish', (id, StreamPath, args) => {
@@ -706,6 +746,7 @@ console.log(`   📺 Internal HTTP: 8888`);
 console.log(`   📁 Media Root: ${mediaDir}`);
 console.log(`   🎬 FFmpeg Path: ${ffmpegPath}`);
 console.log(`   🎥 HLS Streaming aktiviert`);
+console.log(`   📋 Trans Config:`, JSON.stringify(config.trans, null, 2));
 console.log('═══════════════════════════════════════════');
 
 nms.run();
