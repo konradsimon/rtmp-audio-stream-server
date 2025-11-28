@@ -4,6 +4,8 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
+// Trust proxy for correct HTTPS detection on Railway
+app.set('trust proxy', true);
 const HTTP_PORT = process.env.PORT || 3000;
 const RTMP_PORT = 1935;
 
