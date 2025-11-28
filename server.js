@@ -354,48 +354,81 @@ app.get('/api/stream/status', (req, res) => {
   });
 });
 
-// Find FFmpeg path - Railway/nixpacks installs it via apt
-const { execSync, spawn } = require('child_process');
-let ffmpegPath = 'ffmpeg';
-
-// Try to find FFmpeg in common locations
-const possiblePaths = [
-  'ffmpeg', // PATH
-  '/usr/bin/ffmpeg', // Standard Linux
-  '/usr/local/bin/ffmpeg', // Alternative
-  '/bin/ffmpeg' // Sometimes here
-];
-
+// Find FFmpeg path - Docker installs it at /usr/bin/ffmpeg
+const { execSync } = require('child_process');
+let ffmpegPath = '/usr/bin/ffmpeg'; // Default for Docker
 let ffmpegFound = false;
-for (const testPath of possiblePaths) {
+
+// Try Docker path first (most reliable)
+try {
+  const version = execSync(`${ffmpegPath} -version 2>&1 | head -n 1`, {
+    encoding: 'utf8',
+    timeout: 2000,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  if (version && version.includes('ffmpeg')) {
+    ffmpegFound = true;
+    console.log(`[FFmpeg] ✅ Found at: ${ffmpegPath}`);
+    console.log(`[FFmpeg] Version: ${version.trim()}`);
+  }
+} catch (e) {
+  // Try other methods
+}
+
+// Fallback: Try PATH
+if (!ffmpegFound) {
   try {
-    // Quick test - just check if command exists and is executable
-    execSync(`command -v ${testPath} > /dev/null 2>&1 || which ${testPath} > /dev/null 2>&1`, { 
-      stdio: 'ignore',
-      timeout: 1000
-    });
-    // If that worked, try to get version
-    const result = execSync(`${testPath} -version 2>&1 | head -n 1`, { 
+    const whichResult = execSync('which ffmpeg 2>/dev/null || command -v ffmpeg 2>/dev/null', {
       encoding: 'utf8',
       timeout: 2000,
       stdio: ['ignore', 'pipe', 'pipe']
     });
-    if (result && result.trim()) {
-      ffmpegPath = testPath;
-      ffmpegFound = true;
-      console.log(`[FFmpeg] ✅ Found: ${ffmpegPath}`);
-      console.log(`[FFmpeg] Version: ${result.trim()}`);
-      break;
+    if (whichResult && whichResult.trim()) {
+      ffmpegPath = whichResult.trim();
+      const version = execSync(`${ffmpegPath} -version 2>&1 | head -n 1`, {
+        encoding: 'utf8',
+        timeout: 2000
+      });
+      if (version && version.includes('ffmpeg')) {
+        ffmpegFound = true;
+        console.log(`[FFmpeg] ✅ Found via PATH: ${ffmpegPath}`);
+        console.log(`[FFmpeg] Version: ${version.trim()}`);
+      }
     }
   } catch (e) {
-    // Try next path
-    continue;
+    // Continue
+  }
+}
+
+// Fallback: Try other common paths
+if (!ffmpegFound) {
+  const possiblePaths = ['/usr/local/bin/ffmpeg', '/bin/ffmpeg'];
+  for (const testPath of possiblePaths) {
+    try {
+      const version = execSync(`${testPath} -version 2>&1 | head -n 1`, {
+        encoding: 'utf8',
+        timeout: 2000,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      if (version && version.includes('ffmpeg')) {
+        ffmpegPath = testPath;
+        ffmpegFound = true;
+        console.log(`[FFmpeg] ✅ Found at: ${ffmpegPath}`);
+        console.log(`[FFmpeg] Version: ${version.trim()}`);
+        break;
+      }
+    } catch (e) {
+      continue;
+    }
   }
 }
 
 if (!ffmpegFound) {
-  console.warn('[FFmpeg] ⚠️  Could not verify FFmpeg, will try anyway');
-  console.warn('[FFmpeg] This may cause HLS transcoding to fail');
+  console.error('[FFmpeg] ❌ Could not find FFmpeg!');
+  console.error('[FFmpeg] Expected at: /usr/bin/ffmpeg (Docker)');
+  console.error('[FFmpeg] HLS transcoding will NOT work without FFmpeg');
+} else {
+  console.log(`[FFmpeg] ✅ Ready to use: ${ffmpegPath}`);
 }
 
 // Node Media Server Konfiguration mit HLS-Transcoding
